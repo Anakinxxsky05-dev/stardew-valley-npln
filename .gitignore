@@ -1,0 +1,30 @@
+# Binaries and build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+stardew-server
+wonder-server
+
+# Certificates and private keys generated at runtime
+*.pem
+*.key
+
+# Environment and local configs
+.env
+
+# Runtime directories, traces, evidence and logs
+runtime/
+data/
+captures/
+dist/
+coverage.out
+*.log
+
+# Go workspace files
+go.work
+go.work.sum
+
+# OS metadata
+.DS_Store
+Thumbs.db
