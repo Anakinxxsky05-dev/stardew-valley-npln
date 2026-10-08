@@ -230,3 +230,4 @@ NPLN_GAMESESSION_HOST=<TU_IP_DE_RADMIN_O_LAN>
 3. **Múltiples Instancias en la Misma PC:**
    - Crear dos carpetas separadas: `Nextendo-emu` y `Nextendo-emu2`.
    - Aplicar el parche de **Constant ID** en la segunda instancia para que devuelva `0xCAFF` (`51967`) en lugar de `0xCAFE` (`51966`).
+

@@ -23,3 +23,4 @@ Copiar el archivo `.ips` en la tarjeta SD de la consola:
 ```text
 sdmc:/atmosphere/contents/0100E65002BB8000/exefs/
 ```
+
