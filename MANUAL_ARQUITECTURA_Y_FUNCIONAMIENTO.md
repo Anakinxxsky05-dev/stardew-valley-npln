@@ -231,3 +231,87 @@ NPLN_GAMESESSION_HOST=<TU_IP_DE_RADMIN_O_LAN>
    - Crear dos carpetas separadas: `Nextendo-emu` y `Nextendo-emu2`.
    - Aplicar el parche de **Constant ID** en la segunda instancia para que devuelva `0xCAFF` (`51967`) en lugar de `0xCAFE` (`51966`).
 
+---
+
+## 7. Sistema de Presencia y Monitoreo en Vivo (Nextendo Status Integration)
+
+Para permitir que el estado de los servidores de Nextendo ([nextendo.network/status](https://nextendo.network/status)) muestre a los granjeros conectados, granjas disponibles y el número de espacios libres en tiempo real, se implementó el subsistema de telemetría y presencia conforme al estándar `classics_presence` de Nextendo.
+
+### A. Endpoint `/api/stats`
+* **Puerto y Bind:** Escucha local interna en `127.0.0.1:19515` (definido por variable `NPLN_STATS_LISTEN`). Al correr el contenedor en Docker con `--network host`, el puerto queda expuesto directamente en el loopback del servidor anfitrión.
+* **Autenticación:** Parámetro `key=<STATS_TOKEN>` verificado en tiempo constante (`subtle.ConstantTimeCompare`) para mitigar ataques de temporización.
+* **Gestión de Token:** Se carga desde `/data/private/dash_token` (modo `0600`). Si no existe, genera 32 bytes criptográficamente seguros (64 caracteres hexadecimales).
+* **Manejo de Tiempos de Espera:** Protegido con `http.TimeoutHandler` a 4 segundos para evitar que la API se cuelgue si hay lecturas lentas concurrentes.
+
+### B. Especificación del Esquema JSON (`classics_presence`)
+
+```json
+{
+  "game": "0100e65002bb8000",
+  "connected": 1,
+  "inLobby": 1,
+  "activeLobbies": 1,
+  "peakConnected": 1,
+  "totalRmc": 9,
+  "uptimeSeconds": 120,
+  "server": {
+    "sniHost": "t-9f607adf-lp1.lp1.t.npln.srv.nintendo.net",
+    "securePort": 443,
+    "stack": "NPLN-Pia"
+  },
+  "players": [
+    {
+      "pid": 1800046989,
+      "name": "Harith",
+      "state": "lobby",
+      "activity": "Harith's Farm",
+      "gathering": 1,
+      "lastAction": "AllocateIceServerSet",
+      "calls": 4,
+      "onlineSeconds": 115,
+      "idleSeconds": 12
+    }
+  ],
+  "gatherings": [
+    {
+      "id": 1,
+      "type": "Harith's Farm",
+      "kind": "online",
+      "count": 1,
+      "max": 4,
+      "state": "open",
+      "players": [
+        {
+          "pid": 1800046989,
+          "name": "Harith",
+          "host": true
+        }
+      ]
+    }
+  ],
+  "methods": [
+    { "name": "WriteDocuments", "count": 5 },
+    { "name": "AllocateIceServerSet", "count": 1 }
+  ]
+}
+```
+
+### C. Detección Inteligente del Nombre de Granja y Miembros PIA
+* **Extracción de Metadatos PIA:** Cuando el anfitrión sincroniza su sesión mediante `Gamesync/WriteDocuments`, el servidor lee el bloque binario `_Pia_SystemData` (offset 28) y `_Pia_ApplicationData`.
+* **Asignación de Nombre:** Si el anfitrión se llama *"Harith"*, el servidor genera automáticamente el nombre de la sala como `"Harith's Farm"`.
+* **Capacidad Máxima:** Fijada a un máximo de **4 jugadores**, coincidiendo con la arquitectura cooperativa oficial de Stardew Valley en Nintendo Switch.
+* **Resolución UID <-> PID:** El interceptor de llamadas gRPC vincula de inmediato los PIDs extraídos del token JWT con el UID del usuario (`retenirIdentite`), garantizando que tanto en `players` como en `gatherings` aparezca el PID positivo canónico y el apodo real del jugador en vez de identificadores genéricos.
+* **Control de Inactividad (`idleSeconds`):** Para evitar que monitores de presencia descarten jugadores en sesiones cooperativas largas sin tráfico RPC continuo, se ajusta `idleSeconds` con un tope de 30 segundos mientras el usuario permanezca dentro de una granja activa (`state: "lobby"`).
+
+### D. Pipeline de Integración en Nextendo
+1. **Catalog Service (`/opt/nextendo-catalog-v1`):**
+   - `count-sources.json`: Fuente tipo `classics_presence` apuntando a `http://127.0.0.1:19515/api/stats?key=...`.
+   - `status_live.py`: Declaración de `STARDEW_VALLEY = '0100e65002bb8000'`, agregado a `TITLES` (`'Stardew Valley', 4`) y habilitación de nombres de granjas en `normalize()`.
+   - `catalog.json`: Publicación firmada con revisión incrementada a `21` (versiones aceptadas hasta la `1.5.4.2`).
+2. **Frontend Web (`/opt/nextendo-site`):**
+   - `assets/js/jd22-counts.js`: Mapeo en el registro `classics` para consulta paralela de conteo online.
+   - `assets/js/pages.js`: Inclusión de `0100e65002bb8000` en `detailedTitles` para desplegar la tarjeta interactiva de granjas y jugadores.
+   - `assets/js/sm3dw-counts.js`: Limpieza del endpoint obsoleto `/game-stats/stardew`.
+   - Cache busters: Actualizados con `?v=stardew-20261109` en `status.html` e `index.html`.
+
+
