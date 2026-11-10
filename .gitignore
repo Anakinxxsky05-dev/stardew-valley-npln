@@ -4,7 +4,9 @@
 *.so
 *.dylib
 stardew-server
+stardew-server-linux
 wonder-server
+dash_token
 
 # Certificates and private keys generated at runtime
 *.pem

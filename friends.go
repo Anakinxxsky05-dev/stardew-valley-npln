@@ -73,8 +73,14 @@ func pidFromJWT(tok string) (uint64, bool) {
 
 func uidFromCtx(ctx context.Context) string {
 	md, _ := metadata.FromIncomingContext(ctx)
-	if v := md.Get("uid"); len(v) > 0 {
+	if v := md.Get("uid"); len(v) > 0 && v[0] != "" {
 		return v[0]
+	}
+	if pid, ok := callerPID(ctx); ok && pid != 0 {
+		if u := getKnownUser(pid); u != nil && u.UserID != "" {
+			return u.UserID
+		}
+		return fmt.Sprintf("u-%d", pid)
 	}
 	return ""
 }
@@ -264,19 +270,75 @@ func presenceHeartbeat() *friendspb.Heartbeat {
 
 func (p *presenceServer) KeepAlive(stream grpc.BidiStreamingServer[friendspb.KeepAliveRequest, friendspb.KeepAliveResponse]) error {
 	ctx := stream.Context()
-	log.Printf("[NPLN Presence] KeepAlive stream opened")
+	uid := uidFromCtx(ctx)
+	if uid == "" {
+		if pid, ok := callerPID(ctx); ok {
+			uid = fmt.Sprintf("u-%d", pid)
+		} else {
+			uid = "u-unknown"
+		}
+	}
+	log.Printf("[NPLN Presence] KeepAlive stream opened uid=%s", uid)
 
-	ticker := time.NewTicker(30 * time.Second)
+	pid, _ := callerPID(ctx)
+	if pid == 0 {
+		pid = pidPourUid(uid)
+	}
+	globalStatsTracker.userConnected(uid, pid)
+
+	defer func() {
+		log.Printf("[NPLN Presence] KeepAlive stream closed uid=%s", uid)
+		globalStatsTracker.userDisconnected(uid)
+	}()
+
+	// Send initial heartbeat once upon connection
+	if err := stream.SendMsg(&friendspb.KeepAliveResponse{
+		Heartbeat: presenceHeartbeat(),
+	}); err != nil {
+		return err
+	}
+
+	reqCh := make(chan *friendspb.KeepAliveRequest, 16)
+	errCh := make(chan error, 1)
+
+	go func() {
+		for {
+			req, err := stream.Recv()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			reqCh <- req
+		}
+	}()
+
+	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-errCh:
+			log.Printf("[NPLN Presence] KeepAlive client closed uid=%s: %v", uid, err)
+			return err
+		case req := <-reqCh:
+			globalStatsTracker.userActive(uid)
+			if update := req.GetUpdatePresence(); update != nil {
+				log.Printf("[NPLN Presence] KeepAlive UpdatePresence from uid=%s: %+v", uid, update.GetPresence())
+				if err := stream.SendMsg(&friendspb.KeepAliveResponse{
+					Heartbeat: presenceHeartbeat(),
+				}); err != nil {
+					return err
+				}
+			}
 		case <-ticker.C:
-			_ = stream.SendMsg(&friendspb.KeepAliveResponse{
+			globalStatsTracker.userActive(uid)
+			if err := stream.SendMsg(&friendspb.KeepAliveResponse{
 				Heartbeat: presenceHeartbeat(),
-			})
+			}); err != nil {
+				return err
+			}
 		}
 	}
 }

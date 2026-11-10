@@ -71,6 +71,7 @@ func logMetadata(ctx context.Context, method string) {
 
 func traceInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	logMetadata(ctx, info.FullMethod)
+	globalStatsTracker.recordCall(info.FullMethod, ctx)
 	wonderProbe.captureMessage(ctx, "in", info.FullMethod, req)
 	resp, err := handler(ctx, req)
 	if err == nil && resp != nil {
@@ -79,6 +80,8 @@ func traceInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, 
 	logRPCResult(info.FullMethod, err)
 	return resp, err
 }
+
+var globalSessionRegistry = newSessionRegistry()
 
 func buildServer(creds credentials.TransportCredentials) *grpc.Server {
 	maxMessageBytes := envInt("NPLN_MAX_MESSAGE_BYTES", 32<<20)
@@ -102,7 +105,7 @@ func buildServer(creds credentials.TransportCredentials) *grpc.Server {
 	}
 
 	s := grpc.NewServer(opts...)
-	sessions := newSessionRegistry()
+	sessions := globalSessionRegistry
 
 	// Register Core NPLN Services
 	authpb.RegisterAuthServer(s, &authServer{})
@@ -233,6 +236,13 @@ func main() {
 		wonderProbe.record(probeEvent{Kind: "nncs_disabled"})
 		log.Printf("[NNCS] Disabled by NPLN_NNCS_ENABLED")
 	}
+
+	statsListen := envOr("NPLN_STATS_LISTEN", "127.0.0.1:19515")
+	statsSrv, err := startStatsServer(statsListen, "", globalSessionRegistry)
+	if err != nil {
+		log.Fatalf("Failed to start stats server: %v", err)
+	}
+	defer statsSrv.Close()
 
 	if os.Getenv("NPLN_STANDALONE_GRPC") != "" {
 		tlsCert, err := tls.LoadX509KeyPair(certFile, keyFile)

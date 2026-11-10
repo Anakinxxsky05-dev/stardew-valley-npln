@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -20,14 +21,111 @@ import (
 // One registry is injected into all three services by buildServer. Session
 // pointers and their membership are accessed only while mu is held.
 type sessionRegistry struct {
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	sessions   map[string]*mmpb.GameSession
 	pooled     map[string]*publicMatchSession
 	friendUIDs func(context.Context, string) (map[string]bool, error)
+	farmNames  map[string]string
+}
+
+type statsSessionInfo struct {
+	id         int
+	worldName  string
+	maxPlayers int
+	members    []statsGatheringPlayer
+	memberUIDs map[string]bool
+}
+
+func (r *sessionRegistry) maxParticipants(gsID string) int {
+	if r == nil {
+		return 4
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if gs := r.sessions[lastResourceSegment(gsID)]; gs != nil && gs.MaxParticipantCount > 0 {
+		return int(gs.MaxParticipantCount)
+	}
+	return 4
+}
+
+func (r *sessionRegistry) snapshotForStats() []statsSessionInfo {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	activeSessions := make([]statsSessionInfo, 0)
+	sessIdx := 1
+	for gsID, gs := range r.sessions {
+		if gs == nil || gs.State == mmpb.GameSession_TERMINATED {
+			continue
+		}
+		activeCount := 0
+		var gPlayers []statsGatheringPlayer
+		uidSet := make(map[string]bool)
+
+		var hostName string
+		for i, u := range gs.UserSessions {
+			if u.State == mmpb.UserSession_ACTIVE {
+				activeCount++
+				uUID := userIDFromPath(u.User)
+				uidSet[uUID] = true
+				pid := pidPourUid(uUID)
+				if pid == 0 {
+					if p, ok := globalStatsTracker.activePlayers[uUID]; ok && p.PID != 0 {
+						pid = p.PID
+						retenirIdentite(uUID, pid)
+					}
+				}
+				name := "Player"
+				if uKnown := getKnownUser(pid); uKnown != nil && uKnown.Name != "" {
+					name = uKnown.Name
+				} else if pid != 0 {
+					name = fmt.Sprintf("Player %d", pid)
+				}
+				if i == 0 {
+					hostName = name
+				}
+				gPlayers = append(gPlayers, statsGatheringPlayer{
+					PID:  pid,
+					Name: name,
+					Host: i == 0,
+				})
+			}
+		}
+
+		if activeCount > 0 {
+			farmName := "Stardew Valley Farm"
+			if r.farmNames != nil && r.farmNames[gsID] != "" {
+				farmName = r.farmNames[gsID]
+			} else if hostName != "" && hostName != "Player" {
+				farmName = hostName + "'s Farm"
+			}
+			maxP := int(gs.MaxParticipantCount)
+			if maxP <= 0 || maxP > 4 {
+				maxP = 4
+			}
+			activeSessions = append(activeSessions, statsSessionInfo{
+				id:         sessIdx,
+				worldName:  farmName,
+				maxPlayers: maxP,
+				members:    gPlayers,
+				memberUIDs: uidSet,
+			})
+			sessIdx++
+		}
+	}
+	return activeSessions
 }
 
 func newSessionRegistry() *sessionRegistry {
-	return &sessionRegistry{sessions: make(map[string]*mmpb.GameSession), pooled: make(map[string]*publicMatchSession), friendUIDs: canonicalFriendUIDs}
+	return &sessionRegistry{
+		sessions:   make(map[string]*mmpb.GameSession),
+		pooled:     make(map[string]*publicMatchSession),
+		friendUIDs: canonicalFriendUIDs,
+		farmNames:  make(map[string]string),
+	}
 }
 
 func chooseRegistry(registries []*sessionRegistry) *sessionRegistry {
@@ -111,8 +209,8 @@ func sessionHasUID(session *mmpb.GameSession, uid string) bool {
 }
 
 func (r *sessionRegistry) member(gameSession, userSession, uid string) (*mmpb.GameSession, *mmpb.UserSession) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	gs := r.sessions[lastResourceSegment(gameSession)]
 	for _, u := range gs.GetUserSessions() {
 		if lastResourceSegment(u.Name) == lastResourceSegment(userSession) && userIDFromPath(u.User) == uid && u.State == mmpb.UserSession_ACTIVE {
@@ -151,6 +249,9 @@ func (r *sessionRegistry) depart(gameSession, userSession string) {
 	if len(users) == 0 {
 		gs.CanParticipate = false
 		gs.State = mmpb.GameSession_TERMINATED
+		if r.farmNames != nil {
+			delete(r.farmNames, id)
+		}
 	}
 }
 
@@ -209,10 +310,41 @@ func (r *sessionRegistry) updateSessionFromGamesync(gameSession string, doc *gsp
 						name := string(b[28 : 28+nameLen])
 						if len(gs.UserSessions) > 0 {
 							hostUID := lastResourceSegment(gs.UserSessions[0].User)
-							if hostPID := pidPourUid(hostUID); hostPID != 0 {
+							hostPID := pidPourUid(hostUID)
+							if hostPID == 0 {
+								if p, ok := globalStatsTracker.activePlayers[hostUID]; ok && p.PID != 0 {
+									hostPID = p.PID
+									retenirIdentite(hostUID, hostPID)
+								}
+							}
+							if hostPID != 0 {
 								updateKnownUserName(hostPID, name)
+								globalStatsTracker.updatePlayerName(hostPID, name)
 							}
 						}
+						if r.farmNames == nil {
+							r.farmNames = make(map[string]string)
+						}
+						if r.farmNames[id] == "" {
+							r.farmNames[id] = name + "'s Farm"
+						}
+					}
+				}
+			}
+			if appVal := gs.Properties.Fields["_Pia_ApplicationData"]; appVal != nil {
+				if b := appVal.GetBytesValue(); len(b) > 0 {
+					raw := strings.TrimRight(string(b), "\x00")
+					clean := strings.Map(func(rn rune) rune {
+						if rn >= 32 && rn < 127 {
+							return rn
+						}
+						return -1
+					}, raw)
+					if len(clean) >= 2 && len(clean) <= 32 {
+						if r.farmNames == nil {
+							r.farmNames = make(map[string]string)
+						}
+						r.farmNames[id] = clean
 					}
 				}
 			}

@@ -25,7 +25,7 @@ import (
 
 type matchmakerServer struct {
 	mmpb.UnimplementedMatchmakerServer
-	mu             *sync.Mutex
+	mu             *sync.RWMutex
 	registry       *sessionRegistry
 	tickets        map[string]*mmpb.MatchmakingTicket
 	ticketSessions map[string]*publicMatchSession
@@ -423,7 +423,7 @@ func (m *matchmakerServer) CancelMatchmakingTicket(ctx context.Context, req *mmp
 
 type gameSessionServer struct {
 	mmpb.UnimplementedGameSessionServiceServer
-	mu            *sync.Mutex
+	mu            *sync.RWMutex
 	registry      *sessionRegistry
 	tickets       map[string]*mmpb.GameSessionCreationTicket
 	sessions      map[string]*mmpb.GameSession
